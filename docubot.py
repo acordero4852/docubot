@@ -8,7 +8,44 @@ Core DocuBot class responsible for:
 """
 
 import os
+import re
 import glob
+
+# Common words that match every doc and say nothing about relevance.
+STOPWORDS = {"the", "a", "an", "is", "are", "of", "to", "in", "on", "for", "and",
+             "or", "do", "i", "how", "where", "which", "what", "does", "it", "be"}
+
+# A snippet must match at least this many distinct query words to count as evidence.
+MIN_SCORE = 2
+
+
+def sections(text):
+    """Split on blank lines; glue a lone '#' heading onto the paragraph after it."""
+    out, heading = [], ""
+    for block in (b.strip() for b in text.split("\n\n")):
+        if not block:
+            continue
+        if block.startswith("#") and "\n" not in block:
+            heading = block + "\n"
+            continue
+        out.append(heading + block)
+        heading = ""
+    return out
+
+
+def words(text):
+    """Lowercase, punctuation-free words minus stopwords."""
+    found = re.findall(r"[a-z0-9_]+", text.lower())
+    return [stem(w) for w in found if w not in STOPWORDS]
+
+
+def stem(w):
+    """Crude suffix strip so 'generated' and 'generation' both become 'generat'."""
+    for suffix in ("ion", "ed", "ing", "es", "s"):
+        if w.endswith(suffix) and len(w) > len(suffix) + 3:
+            return w[: -len(suffix)]
+    return w
+
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -64,7 +101,9 @@ class DocuBot:
         ignore punctuation if needed.
         """
         index = {}
-        # TODO: implement simple indexing
+        for filename, text in documents:
+            for w in set(words(text)):
+                index.setdefault(w, []).append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -81,8 +120,9 @@ class DocuBot:
         - Count how many appear in the text
         - Return the count as the score
         """
-        # TODO: implement scoring
-        return 0
+        # Score = number of DISTINCT query words present, so a snippet covering
+        # more of the question beats one repeating a single word.
+        return len(set(words(query)) & set(words(text)))
 
     def retrieve(self, query, top_k=3):
         """
@@ -91,9 +131,14 @@ class DocuBot:
 
         Return a list of (filename, text) sorted by score descending.
         """
-        results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        # The index narrows to docs with a query word; then we score each section.
+        candidates = {f for w in words(query) for f in self.index.get(w, [])}
+        scored = [(self.score_document(query, sec), f, sec)
+                  for f, text in self.documents if f in candidates
+                  for sec in sections(text)]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        # Guardrail: weak matches are not evidence, so return [] ("I do not know").
+        return [(f, sec) for score, f, sec in scored[:top_k] if score >= MIN_SCORE]
 
     # -----------------------------------------------------------
     # Answering Modes
